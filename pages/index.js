@@ -1,75 +1,66 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect } from 'react';
 import { db } from '../lib/firebase'; 
 import { doc, updateDoc, collection, addDoc, onSnapshot, query, orderBy, limit, serverTimestamp, getDoc } from "firebase/firestore";
 
-// --- AUDIO ENGINE ---
-// We declare context outside to keep it persistent
+// --- AUDIO ENGINE (Safeguarded) ---
 let audioCtx = null;
 
 const initAudio = () => {
-  if (!audioCtx && typeof window !== 'undefined') {
+  if (typeof window === 'undefined') return;
+  try {
     const AudioContext = window.AudioContext || window.webkitAudioContext;
-    if (AudioContext) {
+    if (AudioContext && !audioCtx) {
       audioCtx = new AudioContext();
-      // Play silent buffer to unlock audio on mobile
-      const buffer = audioCtx.createBuffer(1, 1, 22050);
-      const source = audioCtx.createBufferSource();
-      source.buffer = buffer;
-      source.connect(audioCtx.destination);
-      source.start(0);
     }
+    // Resume if suspended (common mobile fix)
+    if (audioCtx && audioCtx.state === 'suspended') {
+      audioCtx.resume();
+    }
+  } catch (e) {
+    console.error("Audio init failed, continuing silent mode.");
   }
 };
 
 const playSound = (type) => {
-  if (!audioCtx) initAudio();
-  if (!audioCtx) return;
-  if (audioCtx.state === 'suspended') audioCtx.resume();
+  // If audio system is broken, just exit function (don't crash app)
+  if (!audioCtx) { initAudio(); if (!audioCtx) return; }
+  
+  try {
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    const now = audioCtx.currentTime;
 
-  const osc = audioCtx.createOscillator();
-  const gain = audioCtx.createGain();
-  osc.connect(gain);
-  gain.connect(audioCtx.destination);
-  const now = audioCtx.currentTime;
-
-  if (type === 'hover') {
-    osc.frequency.setValueAtTime(400, now);
-    gain.gain.setValueAtTime(0.02, now);
-    osc.stop(now + 0.05);
-  } else if (type === 'click') {
-    osc.type = 'square';
-    osc.frequency.setValueAtTime(600, now);
-    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
-    osc.stop(now + 0.1);
-  } else if (type === 'success') {
-    osc.type = 'sine';
-    osc.frequency.setValueAtTime(400, now);
-    osc.frequency.linearRampToValueAtTime(800, now + 0.2);
-    gain.gain.setValueAtTime(0.1, now);
-    gain.gain.linearRampToValueAtTime(0, now + 0.4);
-    osc.stop(now + 0.4);
-  } else if (type === 'alarm') {
-    osc.type = 'sawtooth';
-    osc.frequency.setValueAtTime(800, now);
-    osc.frequency.linearRampToValueAtTime(400, now + 0.2);
-    gain.gain.setValueAtTime(0.3, now);
-    gain.gain.linearRampToValueAtTime(0, now + 0.4);
+    if (type === 'hover') {
+      osc.frequency.setValueAtTime(400, now);
+      gain.gain.setValueAtTime(0.02, now);
+      osc.stop(now + 0.05);
+    } else if (type === 'click') {
+      osc.type = 'square';
+      osc.frequency.setValueAtTime(600, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
+      osc.stop(now + 0.1);
+    } else if (type === 'success') {
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(400, now);
+      osc.frequency.linearRampToValueAtTime(800, now + 0.2);
+      gain.gain.setValueAtTime(0.1, now);
+      gain.gain.linearRampToValueAtTime(0, now + 0.4);
+      osc.stop(now + 0.4);
+    } else if (type === 'alarm') {
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(800, now);
+      osc.frequency.linearRampToValueAtTime(400, now + 0.2);
+      gain.gain.setValueAtTime(0.3, now);
+      gain.gain.linearRampToValueAtTime(0, now + 0.4);
+      osc.start(now);
+      osc.stop(now + 0.4);
+    }
     osc.start(now);
-    osc.stop(now + 0.4);
-    // Double beep
-    const osc2 = audioCtx.createOscillator();
-    const gain2 = audioCtx.createGain();
-    osc2.connect(gain2);
-    gain2.connect(audioCtx.destination);
-    osc2.type = 'sawtooth';
-    osc2.frequency.setValueAtTime(800, now + 0.2);
-    osc2.frequency.linearRampToValueAtTime(400, now + 0.4);
-    gain2.gain.setValueAtTime(0.3, now + 0.2);
-    gain2.gain.linearRampToValueAtTime(0, now + 0.4);
-    osc2.start(now + 0.2);
-    osc2.stop(now + 0.6);
+  } catch (e) {
+    console.log("Audio play error (silent mode active)");
   }
-  osc.start(now);
 };
 
 export default function ProtocolGhostt() {
@@ -81,7 +72,7 @@ export default function ProtocolGhostt() {
   const [mode, setMode] = useState("DASHBOARD"); 
   const [status, setStatus] = useState("STANDBY");
   const [countdown, setCountdown] = useState("CALCULATING...");
-  const [alarmActive, setAlarmActive] = useState(false); // FOR FLASHING RED
+  const [alarmActive, setAlarmActive] = useState(false);
 
   // DATA
   const [secret, setSecret] = useState("");
@@ -123,12 +114,11 @@ export default function ProtocolGhostt() {
 
     fetchLastSeen();
 
-    // Hunter Listener (THE ALARM LOGIC)
+    // Hunter Listener
     try {
       const q = query(collection(db, "hunter_logs"), orderBy("timestamp", "desc"), limit(5));
       const unsubscribe = onSnapshot(q, (snapshot) => {
         const hits = snapshot.docs.map(doc => doc.data());
-        // Check if we have a new hit (compare lengths or timestamp)
         if (hits.length > 0 && hunterHits.length > 0 && hits[0].timestamp > hunterHits[0].timestamp) {
              triggerAlarm();
         }
@@ -138,7 +128,7 @@ export default function ProtocolGhostt() {
     } catch (e) {}
   }, []);
 
-  // 2. COUNTDOWN (FIXED: Added Minutes & Seconds)
+  // 2. COUNTDOWN
   useEffect(() => {
     if (!lastSeen) return;
     const interval = setInterval(() => {
@@ -176,11 +166,19 @@ export default function ProtocolGhostt() {
     } catch(e) {}
   };
 
+  // --- THE FIX: UNLOCK LOGIC ---
   const handleUnlock = () => {
-    initAudio(); // WAKE UP AUDIO ON FIRST TAP
-    playSound('success');
-    addLog("IDENTITY VERIFIED");
-    setTimeout(() => setView("HUD"), 500);
+    // 1. Force the UI change FIRST (so it never gets stuck)
+    setView("HUD"); 
+    
+    // 2. Try Audio SECOND (safe mode)
+    try {
+      initAudio(); 
+      playSound('success');
+      addLog("IDENTITY VERIFIED");
+    } catch (e) {
+      console.log("Audio failed start");
+    }
   };
 
   const generateTrap = () => {
@@ -230,6 +228,7 @@ export default function ProtocolGhostt() {
   );
 
   if (view === "LOCK") return (
+    // Added explicit full-screen click handler backup
     <div onClick={handleUnlock} className="min-h-screen bg-black text-green-500 font-mono flex flex-col items-center justify-center cursor-pointer">
       <div className="border-2 border-green-500 rounded-full p-8 animate-pulse shadow-[0_0_20px_rgba(0,255,0,0.4)]">
         <svg viewBox="0 0 24 24" fill="currentColor" className="w-12 h-12"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8z"/></svg>
@@ -239,14 +238,13 @@ export default function ProtocolGhostt() {
   );
 
   return (
-    // FLASHING RED BACKGROUND ON ALARM
     <div className={`min-h-screen font-mono p-2 flex flex-col overflow-hidden transition-colors duration-200 ${alarmActive ? "bg-red-900" : "bg-black"} text-green-400`}>
       
       {/* HEADER */}
       <header className="flex justify-between items-start border-b border-green-800 pb-2 mb-2 pt-2">
         <div>
           <h1 className="text-lg font-bold tracking-widest text-green-300">GHOSTT_OS</h1>
-          <div className="text-[10px] text-green-700">SECURE SHELL // V6.0</div>
+          <div className="text-[10px] text-green-700">SECURE SHELL // V6.1</div>
         </div>
         <div className="text-right">
           <div className="text-sm font-bold tracking-widest">{clockTime}</div>
@@ -263,7 +261,6 @@ export default function ProtocolGhostt() {
         {/* DEAD MAN SWITCH */}
         <div className="border border-green-800 bg-green-900/5 p-4 text-center">
           <h2 className="text-[10px] text-green-600 mb-1 tracking-widest">PROTOCOL DEADLINE</h2>
-          {/* FIXED: Now shows Minutes and Seconds */}
           <div className="text-2xl font-bold text-white mb-2">{countdown}</div>
           <button onClick={pingSystem} disabled={status==="PROCESSING"} className="w-full py-2 text-xs border border-green-600 hover:bg-green-600 hover:text-black transition-colors uppercase">
             {status==="PROCESSING" ? "SYNCING..." : "RENEW SIGNAL"}
@@ -319,7 +316,6 @@ export default function ProtocolGhostt() {
           )}
 
           {mode === "VAULT" && (
-            // FIXED: Vault is now UNLOCKED and functional
             <div className="flex flex-col gap-3">
               <div className="text-[10px] text-green-700 uppercase border-b border-green-900 pb-1">Destination</div>
               <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="EMERGENCY EMAIL" className="bg-green-900/10 border border-green-800 p-2 text-green-400 text-xs" />
