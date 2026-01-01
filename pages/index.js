@@ -4,7 +4,7 @@ import { doc, updateDoc, collection, addDoc, getDoc, serverTimestamp } from "fir
 
 // --- ICONS ---
 const FingerprintIcon = () => (
-  <svg viewBox="0 0 24 24" fill="none" className="w-16 h-16 text-green-500 animate-pulse cursor-pointer">
+  <svg viewBox="0 0 24 24" fill="none" className="w-16 h-16 text-green-500 animate-pulse cursor-pointer hover:text-green-400 transition-colors">
     <path d="M12 2a10 10 0 0 0-7.07 17.07l1.41-1.41A8 8 0 1 1 12 4v0zm0 14a3 3 0 1 0 0-6 3 3 0 0 0 0 6zm0 2a5 5 0 1 1 0-10 5 5 0 0 1 0 10z" fill="currentColor"/>
     <path d="M12 22c5.52 0 10-4.48 10-10h-2c0 4.41-3.59 8-8 8s-8-3.59-8-8H2c0 5.52 4.48 10 10 10z" fill="currentColor" opacity="0.5"/>
   </svg>
@@ -14,11 +14,76 @@ const LockIcon = () => (
   <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" /></svg>
 );
 
+// --- AUDIO ENGINE (Generates Sci-Fi Sounds) ---
+const playSound = (type) => {
+  if (typeof window === 'undefined') return;
+  const AudioContext = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContext) return;
+  
+  const ctx = new AudioContext();
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  
+  osc.connect(gain);
+  gain.connect(ctx.destination);
+
+  if (type === 'hover') {
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(400, ctx.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(600, ctx.currentTime + 0.05);
+    gain.gain.setValueAtTime(0.05, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.05);
+    osc.start();
+    osc.stop(ctx.currentTime + 0.05);
+  } 
+  else if (type === 'click') {
+    osc.type = 'square';
+    osc.frequency.setValueAtTime(800, ctx.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(300, ctx.currentTime + 0.1);
+    gain.gain.setValueAtTime(0.1, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.1);
+    osc.start();
+    osc.stop(ctx.currentTime + 0.1);
+  }
+  else if (type === 'success') {
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(400, ctx.currentTime);
+    osc.frequency.setValueAtTime(800, ctx.currentTime + 0.1);
+    gain.gain.setValueAtTime(0.1, ctx.currentTime);
+    gain.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.4);
+    osc.start();
+    osc.stop(ctx.currentTime + 0.4);
+  }
+  else if (type === 'error') {
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(150, ctx.currentTime);
+    osc.frequency.linearRampToValueAtTime(100, ctx.currentTime + 0.3);
+    gain.gain.setValueAtTime(0.2, ctx.currentTime);
+    gain.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.3);
+    osc.start();
+    osc.stop(ctx.currentTime + 0.3);
+  }
+};
+
+// --- VOICE ENGINE ---
+const speak = (text) => {
+  if (typeof window !== 'undefined' && window.speechSynthesis) {
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.pitch = 0.8; // Lower pitch for "Jarvis" feel
+    utterance.rate = 1.1;  // Slightly faster
+    // Try to find a robotic or deep voice
+    const voices = window.speechSynthesis.getVoices();
+    const preferredVoice = voices.find(v => v.name.includes('Google US English') || v.name.includes('Samantha'));
+    if (preferredVoice) utterance.voice = preferredVoice;
+    window.speechSynthesis.speak(utterance);
+  }
+};
+
 export default function ProtocolGhostt() {
   // --- UI STATES ---
   const [view, setView] = useState("BOOT"); 
-  const [logs, setLogs] = useState([]); // Now stores Objects: { time: "12:00", msg: "..." }
-  const [clockTime, setClockTime] = useState(""); // For the top right display
+  const [logs, setLogs] = useState([]); 
+  const [clockTime, setClockTime] = useState(""); 
   const [battery, setBattery] = useState(100);
   
   // --- LOGIC STATES ---
@@ -33,51 +98,46 @@ export default function ProtocolGhostt() {
   const [email, setEmail] = useState(""); 
   const [lastSeen, setLastSeen] = useState(null);
 
-  // --- HELPER: SYSTEM LOGGER ---
-  // This creates a timestamped log that DOES NOT change later
   const addLog = (message) => {
     const now = new Date();
     const timeString = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
-    setLogs(prev => [...prev.slice(-7), { time: timeString, msg: message }]); // Keep last 8 logs
+    setLogs(prev => [...prev.slice(-7), { time: timeString, msg: message }]);
   };
 
-  // 1. INITIALIZATION & CLOCK
+  // 1. INITIALIZATION
   useEffect(() => {
-    // Boot Sequence
     const bootText = ["INITIALIZING GHOSTT PROTOCOL...", "LOADING KERNEL MODULES...", "CONNECTING TO SATELLITE...", "SYSTEM ONLINE."];
     let delay = 0;
     bootText.forEach((text, i) => {
       delay += 800;
       setTimeout(() => {
         addLog(text);
-        if (i === bootText.length - 1) setTimeout(() => setView("LOCK"), 1000);
+        playSound('click'); // Sound on log entry
+        if (i === bootText.length - 1) {
+            setTimeout(() => setView("LOCK"), 1000);
+            speak("System Online. Authentication Required.");
+        }
       }, delay);
     });
 
-    // Real-time Clock (Updates every second, but display handles formatting)
     const clockInterval = setInterval(() => {
       const now = new Date();
-      // Format: HH:MM (No Seconds)
       setClockTime(`${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`);
     }, 1000);
 
-    // Battery Check
     if (typeof navigator !== 'undefined' && navigator.getBattery) {
       navigator.getBattery().then(b => setBattery(Math.floor(b.level * 100)));
     }
-
     fetchLastSeen();
-
     return () => clearInterval(clockInterval);
   }, []);
 
-  // 2. LIVE COUNTDOWN LOGIC
+  // 2. LIVE COUNTDOWN
   useEffect(() => {
     if (!lastSeen) return;
-    
     const timerInterval = setInterval(() => {
       const now = new Date().getTime();
-      const deadLine = lastSeen.getTime() + (30 * 24 * 60 * 60 * 1000); // 30 Days
+      const deadLine = lastSeen.getTime() + (30 * 24 * 60 * 60 * 1000);
       const distance = deadLine - now;
 
       if (distance < 0) {
@@ -90,12 +150,10 @@ export default function ProtocolGhostt() {
         setCountdown(`${days}D ${hours}H ${minutes}M ${seconds}S`);
       }
     }, 1000);
-
     return () => clearInterval(timerInterval);
   }, [lastSeen]);
 
   // --- ACTIONS ---
-
   const fetchLastSeen = async () => {
     try {
       const docRef = doc(db, "system", "ghostt_status");
@@ -112,31 +170,35 @@ export default function ProtocolGhostt() {
   };
 
   const handleUnlock = () => {
+    playSound('success');
+    if (navigator.vibrate) navigator.vibrate(50); // Haptic Feedback
     addLog("BIOMETRIC SCAN: VERIFIED");
     addLog("ACCESS GRANTED: WELCOME GHOSTT");
+    speak("Identity Verified. Welcome back, Ghost.");
     setTimeout(() => setView("HUD"), 1000);
   };
 
   const switchMode = (newMode) => {
+    playSound('click');
     setMode(newMode);
     addLog(`UI NAVIGATION: ${newMode} PANEL`);
   };
 
   const pingSystem = async () => {
+    playSound('click');
     setStatus("PROCESSING");
     setStatusMsg("CONTACTING SATELLITE...");
     addLog("INITIATING HANDSHAKE PROTOCOL...");
     
     try {
       const ghostRef = doc(db, "system", "ghostt_status");
-      await updateDoc(ghostRef, { 
-        last_seen: serverTimestamp(), 
-        status: "ACTIVE" 
-      });
+      await updateDoc(ghostRef, { last_seen: serverTimestamp(), status: "ACTIVE" });
       
       setTimeout(() => {
         setLastSeen(new Date()); 
         setStatus("SUCCESS");
+        playSound('success');
+        speak("Protocol Renewed. Timer Reset.");
         setStatusMsg("SIGNAL LOCKED. TIMER RESET.");
         addLog("SUCCESS: HEARTBEAT ACKNOWLEDGED");
         setTimeout(() => {
@@ -147,14 +209,17 @@ export default function ProtocolGhostt() {
 
     } catch (e) {
       setStatus("ERROR");
+      playSound('error');
       setStatusMsg("CONNECTION FAILED");
       addLog(`CRITICAL ERROR: ${e.message}`);
     }
   };
 
   const uploadSecret = async () => {
+    playSound('click');
     if (!secret || !label) {
       setStatus("ERROR");
+      playSound('error');
       setStatusMsg("MISSING DATA FIELDS");
       addLog("ERROR: NULL PAYLOAD DETECTED");
       setTimeout(() => setStatus("STANDBY"), 2000);
@@ -166,12 +231,7 @@ export default function ProtocolGhostt() {
     addLog(`ENCRYPTING: ${label.toUpperCase()}...`);
 
     try {
-      await addDoc(collection(db, "vault"), { 
-        label, 
-        payload: secret, 
-        timestamp: serverTimestamp() 
-      });
-
+      await addDoc(collection(db, "vault"), { label, payload: secret, timestamp: serverTimestamp() });
       if (email) {
         const ghostRef = doc(db, "system", "ghostt_status");
         await updateDoc(ghostRef, { emergency_email: email });
@@ -179,6 +239,8 @@ export default function ProtocolGhostt() {
 
       setTimeout(() => {
         setStatus("SUCCESS");
+        playSound('success');
+        speak("Data Encrypted and Stored.");
         setStatusMsg("UPLOAD SECURE.");
         addLog("UPLOAD COMPLETE: DATA FRAGMENTED");
         setSecret("");
@@ -191,13 +253,13 @@ export default function ProtocolGhostt() {
 
     } catch (e) {
       setStatus("ERROR");
+      playSound('error');
       setStatusMsg("UPLOAD FAILED");
       addLog("ERROR: DATABASE WRITE DENIED");
     }
   };
 
   // --- VIEWS ---
-
   if (view === "BOOT") return (
     <div className="min-h-screen bg-black text-green-600 font-mono p-6 flex flex-col justify-end">
       {logs.map((log, i) => <div key={i} className="opacity-80 text-sm">[{log.time}] {log.msg}</div>)}
@@ -222,14 +284,12 @@ export default function ProtocolGhostt() {
     <div className="min-h-screen bg-black text-green-400 font-mono p-2 overflow-hidden relative selection:bg-green-900 selection:text-white flex flex-col">
       <div className="pointer-events-none fixed inset-0 z-50 opacity-10 bg-[linear-gradient(transparent_50%,rgba(0,255,0,0.25)_50%)] bg-[length:100%_4px]"></div>
       
-      {/* HEADER: Updated Time Size & Format */}
       <header className="flex justify-between items-start border-b border-green-800 pb-2 mb-4 px-2 pt-2">
         <div>
           <h1 className="text-xl font-bold tracking-widest text-green-300">GHOSTT_OS</h1>
           <div className="text-[10px] text-green-700">VPN: ACTIVE // ENCRYPTION: MAX</div>
         </div>
         <div className="text-right">
-          {/* Smaller, cleaner clock */}
           <div className="text-sm font-bold tracking-widest text-green-300">{clockTime}</div>
           <div className="text-[10px] flex justify-end items-center gap-2 text-green-600">
             <span>PWR: {battery}%</span>
@@ -249,7 +309,6 @@ export default function ProtocolGhostt() {
 
       <main className="flex-1 max-w-lg mx-auto w-full relative z-10 flex flex-col gap-4">
         
-        {/* TIMER MODULE */}
         <div className="border border-green-800 bg-green-900/5 p-6 relative overflow-hidden text-center">
           <div className="absolute top-2 right-2 opacity-50"><LockIcon /></div>
           <h2 className="text-xs text-green-600 mb-2 tracking-widest">PROTOCOL OMEGA DEADLINE</h2>
@@ -266,17 +325,14 @@ export default function ProtocolGhostt() {
           </button>
         </div>
 
-        {/* TABS */}
         <div className="flex border-b border-green-800 mx-2">
           <button onClick={() => switchMode("DASHBOARD")} className={`flex-1 py-3 text-xs tracking-widest transition-colors ${mode === "DASHBOARD" ? "bg-green-500 text-black font-bold" : "text-green-800 hover:text-green-500"}`}>CONSOLE</button>
           <button onClick={() => switchMode("VAULT")} className={`flex-1 py-3 text-xs tracking-widest transition-colors ${mode === "VAULT" ? "bg-green-500 text-black font-bold" : "text-green-800 hover:text-green-500"}`}>SECURE VAULT</button>
         </div>
 
-        {/* DYNAMIC CONTENT AREA */}
         <div className="flex-1 bg-black p-4 mx-2 border-x border-b border-green-800 min-h-[300px]">
           {mode === "DASHBOARD" ? (
             <div className="space-y-2 font-mono text-xs h-full flex flex-col justify-end">
-              {/* LOGS RENDERED HERE: Time is now fixed per entry */}
               {logs.map((log, i) => (
                  <div key={i} className="border-l-2 border-green-900 pl-2 text-green-500/70">
                    <span className="text-green-800">[{log.time}]</span> {log.msg}
@@ -320,7 +376,7 @@ export default function ProtocolGhostt() {
       </main>
       
       <footer className="p-4 text-center text-[10px] text-green-900 border-t border-green-900 mt-auto">
-        SECURE CONNECTION ESTABLISHED // V3.1.0
+        SECURE CONNECTION ESTABLISHED // V4.0.0 (AUDIO_ENABLED)
       </footer>
     </div>
   );
