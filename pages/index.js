@@ -2,54 +2,61 @@ import { useState, useEffect, useRef } from 'react';
 import { db } from '../lib/firebase'; 
 import { doc, updateDoc, collection, addDoc, onSnapshot, query, orderBy, limit, serverTimestamp, getDoc } from "firebase/firestore";
 
-// --- AUDIO ENGINE ---
+// --- SAFE AUDIO ENGINE (Prevents Crashes) ---
 const playSound = (type) => {
   if (typeof window === 'undefined') return;
-  const AudioContext = window.AudioContext || window.webkitAudioContext;
-  if (!AudioContext) return;
-  const ctx = new AudioContext();
-  const osc = ctx.createOscillator();
-  const gain = ctx.createGain();
-  osc.connect(gain);
-  gain.connect(ctx.destination);
+  
+  try {
+    const AudioContext = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContext) return;
+    
+    const ctx = new AudioContext();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    
+    osc.connect(gain);
+    gain.connect(ctx.destination);
 
-  if (type === 'hover') {
-    osc.frequency.setValueAtTime(400, ctx.currentTime);
-    gain.gain.setValueAtTime(0.02, ctx.currentTime);
-    osc.stop(ctx.currentTime + 0.05);
-  } else if (type === 'click') {
-    osc.type = 'square';
-    osc.frequency.setValueAtTime(600, ctx.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.1);
-    osc.stop(ctx.currentTime + 0.1);
-  } else if (type === 'alert') {
-    osc.type = 'sawtooth';
-    osc.frequency.setValueAtTime(100, ctx.currentTime);
-    osc.frequency.linearRampToValueAtTime(50, ctx.currentTime + 0.5);
-    gain.gain.setValueAtTime(0.3, ctx.currentTime);
-    gain.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.5);
-    osc.stop(ctx.currentTime + 0.5);
+    const now = ctx.currentTime;
+
+    if (type === 'hover') {
+      osc.frequency.setValueAtTime(400, now);
+      gain.gain.setValueAtTime(0.02, now);
+      osc.stop(now + 0.05);
+    } else if (type === 'click') {
+      osc.type = 'square';
+      osc.frequency.setValueAtTime(600, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
+      osc.stop(now + 0.1);
+    } else if (type === 'alert') {
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(100, now);
+      osc.frequency.linearRampToValueAtTime(50, now + 0.5);
+      gain.gain.setValueAtTime(0.3, now);
+      gain.gain.linearRampToValueAtTime(0, now + 0.5);
+      osc.stop(now + 0.5);
+    }
+    
+    osc.start();
+  } catch (e) {
+    // If browser blocks audio, ignore error and continue
+    console.log("Audio blocked: User interaction required");
   }
-  osc.start();
 };
 
 export default function ProtocolGhostt() {
   // STATES
   const [view, setView] = useState("BOOT"); 
   const [logs, setLogs] = useState([]); 
-  const [clockTime, setClockTime] = useState(""); 
+  const [clockTime, setClockTime] = useState("--:--"); 
   const [battery, setBattery] = useState(100);
-  const [mode, setMode] = useState("DASHBOARD"); // DASHBOARD | VAULT | HUNTER
+  const [mode, setMode] = useState("DASHBOARD"); 
   const [status, setStatus] = useState("STANDBY");
   const [countdown, setCountdown] = useState("CALCULATING...");
 
   // DATA
-  const [secret, setSecret] = useState("");
-  const [label, setLabel] = useState("");
   const [trapLink, setTrapLink] = useState("");
   const [hunterHits, setHunterHits] = useState([]);
-  
-  // LOGIC
   const [lastSeen, setLastSeen] = useState(null);
 
   const addLog = (message, type = "info") => {
@@ -63,17 +70,23 @@ export default function ProtocolGhostt() {
     // Boot Sequence
     const bootText = ["INITIALIZING...", "LOADING KERNEL...", "CONNECTING SATELLITE...", "SYSTEM ONLINE"];
     let delay = 0;
+    
     bootText.forEach((text, i) => {
-      delay += 600;
+      delay += 800;
       setTimeout(() => {
         addLog(text);
-        playSound('click');
-        if (i === bootText.length - 1) setTimeout(() => setView("LOCK"), 800);
+        // Try to play sound, but don't crash if it fails
+        playSound('click'); 
+        
+        // Force transition at the end
+        if (i === bootText.length - 1) {
+          setTimeout(() => setView("LOCK"), 1000);
+        }
       }, delay);
     });
 
     // Clock
-    setInterval(() => {
+    const timer = setInterval(() => {
       const now = new Date();
       setClockTime(`${now.getHours().toString().padStart(2,'0')}:${now.getMinutes().toString().padStart(2,'0')}`);
     }, 1000);
@@ -85,16 +98,20 @@ export default function ProtocolGhostt() {
 
     fetchLastSeen();
 
-    // --- REALTIME LISTENER FOR HUNTER TRAPS ---
-    // This watches the database. If a trap is clicked, it ALERTS you instantly.
-    const q = query(collection(db, "hunter_logs"), orderBy("timestamp", "desc"), limit(5));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const hits = snapshot.docs.map(doc => doc.data());
-      setHunterHits(hits);
-      // Simple logic to detect new hits would go here
-    });
-
-    return () => unsubscribe();
+    // Hunter Listener
+    try {
+      const q = query(collection(db, "hunter_logs"), orderBy("timestamp", "desc"), limit(5));
+      const unsubscribe = onSnapshot(q, (snapshot) => {
+        const hits = snapshot.docs.map(doc => doc.data());
+        setHunterHits(hits);
+      });
+      return () => {
+        clearInterval(timer);
+        unsubscribe();
+      };
+    } catch (e) {
+      console.log("Offline mode or permission issue");
+    }
   }, []);
 
   // 2. COUNTDOWN
@@ -125,11 +142,10 @@ export default function ProtocolGhostt() {
   const handleUnlock = () => {
     playSound('click');
     addLog("IDENTITY VERIFIED");
-    setTimeout(() => setView("HUD"), 800);
+    setTimeout(() => setView("HUD"), 500);
   };
 
   const generateTrap = () => {
-    // In a real deployment, this URL matches your Netlify domain
     const url = `${window.location.origin}/api/trap`;
     setTrapLink(url);
     addLog("TRAP LINK GENERATED");
@@ -151,11 +167,18 @@ export default function ProtocolGhostt() {
   };
 
   // VIEWS
-  if (view === "BOOT") return <div className="min-h-screen bg-black text-green-600 font-mono p-6 flex flex-col justify-end text-xs">{logs.map((l,i)=><div key={i}>[{l.time}] {l.msg}</div>)}</div>;
+  if (view === "BOOT") return (
+    // ADDED: onClick handler here allows you to force-skip if it hangs
+    <div onClick={() => setView("LOCK")} className="min-h-screen bg-black text-green-600 font-mono p-6 flex flex-col justify-end text-xs cursor-pointer">
+      {logs.map((l,i)=><div key={i}>[{l.time}] {l.msg}</div>)}
+      <div className="animate-pulse mt-2">_</div>
+      <div className="fixed top-0 left-0 w-full h-full opacity-0"></div>
+    </div>
+  );
 
   if (view === "LOCK") return (
     <div onClick={handleUnlock} className="min-h-screen bg-black text-green-500 font-mono flex flex-col items-center justify-center cursor-pointer">
-      <div className="border-2 border-green-500 rounded-full p-8 animate-pulse">
+      <div className="border-2 border-green-500 rounded-full p-8 animate-pulse shadow-[0_0_20px_rgba(0,255,0,0.4)]">
         <svg viewBox="0 0 24 24" fill="currentColor" className="w-12 h-12"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8z"/></svg>
       </div>
       <p className="mt-8 tracking-[0.3em] text-xs">TAP TO AUTHENTICATE</p>
@@ -168,7 +191,7 @@ export default function ProtocolGhostt() {
       <header className="flex justify-between items-start border-b border-green-800 pb-2 mb-2 pt-2">
         <div>
           <h1 className="text-lg font-bold tracking-widest text-green-300">GHOSTT_OS</h1>
-          <div className="text-[10px] text-green-700">SECURE SHELL // V5.0</div>
+          <div className="text-[10px] text-green-700">SECURE SHELL // V5.2</div>
         </div>
         <div className="text-right">
           <div className="text-sm font-bold tracking-widest">{clockTime}</div>
@@ -245,7 +268,7 @@ export default function ProtocolGhostt() {
 
           {mode === "VAULT" && (
             <div className="text-center pt-10 text-[10px] opacity-50">
-              [VAULT LOCKED // V5.0 UPDATE REQUIRED]
+              [VAULT LOCKED // V5.2 UPDATE REQUIRED]
             </div>
           )}
 
