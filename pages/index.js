@@ -196,28 +196,3 @@ export default function ProtocolGhostt() {
     </div>
   );
 }
-              className="bg-black border border-green-800 p-3 text-green-500 focus:outline-none focus:border-green-400"
-              value={label}
-              onChange={(e) => setLabel(e.target.value)}
-            />
-            <textarea 
-              placeholder="ENTER CLASSIFIED DATA..."
-              className="bg-black border border-green-800 p-3 h-32 text-green-500 focus:outline-none focus:border-green-400 font-mono"
-              value={secret}
-              onChange={(e) => setSecret(e.target.value)}
-            />
-            <button 
-              onClick={uploadSecret}
-              className="w-full py-3 bg-green-900/30 border border-green-600 hover:bg-green-600 hover:text-black transition-all uppercase font-bold text-sm"
-            >
-              ENCRYPT & UPLOAD
-            </button>
-          </div>
-        )}
-
-      </div>
-
-      <p className="mt-8 text-xs text-green-900 opacity-50">SECURE CONNECTION :: 192.168.X.X</p>
-    </div>
-  );
-}
