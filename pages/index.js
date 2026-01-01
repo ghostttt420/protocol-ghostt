@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { db } from '../lib/firebase'; 
-import { doc, updateDoc, collection, addDoc, getDoc, serverTimestamp } from "firebase/firestore";
+import { doc, updateDoc, collection, addDoc, onSnapshot, query, orderBy, limit, serverTimestamp, getDoc } from "firebase/firestore";
 
 // --- ICONS ---
 const FingerprintIcon = () => (
@@ -14,64 +14,68 @@ const LockIcon = () => (
   <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" /></svg>
 );
 
-// --- AUDIO ENGINE (Generates Sci-Fi Sounds) ---
-const playSound = (type) => {
-  if (typeof window === 'undefined') return;
-  const AudioContext = window.AudioContext || window.webkitAudioContext;
-  if (!AudioContext) return;
-  
-  const ctx = new AudioContext();
-  const osc = ctx.createOscillator();
-  const gain = ctx.createGain();
-  
-  osc.connect(gain);
-  gain.connect(ctx.destination);
+// --- SAFE AUDIO ENGINE ---
+let audioCtx = null;
 
-  if (type === 'hover') {
-    osc.type = 'sine';
-    osc.frequency.setValueAtTime(400, ctx.currentTime);
-    osc.frequency.exponentialRampToValueAtTime(600, ctx.currentTime + 0.05);
-    gain.gain.setValueAtTime(0.05, ctx.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.05);
-    osc.start();
-    osc.stop(ctx.currentTime + 0.05);
-  } 
-  else if (type === 'click') {
-    osc.type = 'square';
-    osc.frequency.setValueAtTime(800, ctx.currentTime);
-    osc.frequency.exponentialRampToValueAtTime(300, ctx.currentTime + 0.1);
-    gain.gain.setValueAtTime(0.1, ctx.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.1);
-    osc.start();
-    osc.stop(ctx.currentTime + 0.1);
-  }
-  else if (type === 'success') {
-    osc.type = 'sine';
-    osc.frequency.setValueAtTime(400, ctx.currentTime);
-    osc.frequency.setValueAtTime(800, ctx.currentTime + 0.1);
-    gain.gain.setValueAtTime(0.1, ctx.currentTime);
-    gain.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.4);
-    osc.start();
-    osc.stop(ctx.currentTime + 0.4);
-  }
-  else if (type === 'error') {
-    osc.type = 'sawtooth';
-    osc.frequency.setValueAtTime(150, ctx.currentTime);
-    osc.frequency.linearRampToValueAtTime(100, ctx.currentTime + 0.3);
-    gain.gain.setValueAtTime(0.2, ctx.currentTime);
-    gain.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.3);
-    osc.start();
-    osc.stop(ctx.currentTime + 0.3);
-  }
+const initAudio = () => {
+  if (typeof window === 'undefined') return;
+  try {
+    const AudioContext = window.AudioContext || window.webkitAudioContext;
+    if (AudioContext && !audioCtx) {
+      audioCtx = new AudioContext();
+    }
+    if (audioCtx && audioCtx.state === 'suspended') {
+      audioCtx.resume();
+    }
+  } catch (e) { console.error("Audio init error"); }
+};
+
+const playSound = (type) => {
+  if (!audioCtx) { initAudio(); if (!audioCtx) return; }
+  
+  try {
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    const now = audioCtx.currentTime;
+
+    if (type === 'hover') {
+      osc.frequency.setValueAtTime(400, now);
+      gain.gain.setValueAtTime(0.02, now);
+      osc.stop(now + 0.05);
+    } else if (type === 'click') {
+      osc.type = 'square';
+      osc.frequency.setValueAtTime(600, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
+      osc.stop(now + 0.1);
+    } else if (type === 'success') {
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(400, now);
+      osc.frequency.linearRampToValueAtTime(800, now + 0.2);
+      gain.gain.setValueAtTime(0.1, now);
+      gain.gain.linearRampToValueAtTime(0, now + 0.4);
+      osc.stop(now + 0.4);
+    } else if (type === 'alarm') {
+      // SIREN SOUND
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(800, now);
+      osc.frequency.linearRampToValueAtTime(400, now + 0.3);
+      gain.gain.setValueAtTime(0.3, now);
+      gain.gain.linearRampToValueAtTime(0, now + 0.3);
+      osc.start(now);
+      osc.stop(now + 0.3);
+    }
+    if (type !== 'alarm') osc.start(now);
+  } catch (e) { }
 };
 
 // --- VOICE ENGINE ---
 const speak = (text) => {
   if (typeof window !== 'undefined' && window.speechSynthesis) {
     const utterance = new SpeechSynthesisUtterance(text);
-    utterance.pitch = 0.8; // Lower pitch for "Jarvis" feel
-    utterance.rate = 1.1;  // Slightly faster
-    // Try to find a robotic or deep voice
+    utterance.pitch = 0.8; 
+    utterance.rate = 1.1;  
     const voices = window.speechSynthesis.getVoices();
     const preferredVoice = voices.find(v => v.name.includes('Google US English') || v.name.includes('Samantha'));
     if (preferredVoice) utterance.voice = preferredVoice;
@@ -83,8 +87,9 @@ export default function ProtocolGhostt() {
   // --- UI STATES ---
   const [view, setView] = useState("BOOT"); 
   const [logs, setLogs] = useState([]); 
-  const [clockTime, setClockTime] = useState(""); 
+  const [clockTime, setClockTime] = useState("--:--"); 
   const [battery, setBattery] = useState(100);
+  const [alarmActive, setAlarmActive] = useState(false); // FOR FLASHING RED
   
   // --- LOGIC STATES ---
   const [status, setStatus] = useState("STANDBY"); 
@@ -96,12 +101,14 @@ export default function ProtocolGhostt() {
   const [secret, setSecret] = useState("");
   const [label, setLabel] = useState("");
   const [email, setEmail] = useState(""); 
+  const [trapLink, setTrapLink] = useState("");
+  const [hunterHits, setHunterHits] = useState([]);
   const [lastSeen, setLastSeen] = useState(null);
 
-  const addLog = (message) => {
+  const addLog = (message, type = "info") => {
     const now = new Date();
     const timeString = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
-    setLogs(prev => [...prev.slice(-7), { time: timeString, msg: message }]);
+    setLogs(prev => [...prev.slice(-7), { time: timeString, msg: message, type }]);
   };
 
   // 1. INITIALIZATION
@@ -112,7 +119,6 @@ export default function ProtocolGhostt() {
       delay += 800;
       setTimeout(() => {
         addLog(text);
-        playSound('click'); // Sound on log entry
         if (i === bootText.length - 1) {
             setTimeout(() => setView("LOCK"), 1000);
             speak("System Online. Authentication Required.");
@@ -129,10 +135,23 @@ export default function ProtocolGhostt() {
       navigator.getBattery().then(b => setBattery(Math.floor(b.level * 100)));
     }
     fetchLastSeen();
-    return () => clearInterval(clockInterval);
+
+    // --- HUNTER LISTENER (ALARM LOGIC) ---
+    try {
+      const q = query(collection(db, "hunter_logs"), orderBy("timestamp", "desc"), limit(5));
+      const unsubscribe = onSnapshot(q, (snapshot) => {
+        const hits = snapshot.docs.map(doc => doc.data());
+        // Trigger alarm if new hit comes in
+        if (hits.length > 0 && hunterHits.length > 0 && hits[0].timestamp > hunterHits[0].timestamp) {
+             triggerAlarm();
+        }
+        setHunterHits(hits);
+      });
+      return () => { clearInterval(clockInterval); unsubscribe(); };
+    } catch (e) {}
   }, []);
 
-  // 2. LIVE COUNTDOWN
+  // 2. LIVE COUNTDOWN (Precise)
   useEffect(() => {
     if (!lastSeen) return;
     const timerInterval = setInterval(() => {
@@ -143,11 +162,11 @@ export default function ProtocolGhostt() {
       if (distance < 0) {
         setCountdown("PROTOCOL OMEGA EXECUTED");
       } else {
-        const days = Math.floor(distance / (1000 * 60 * 60 * 24));
-        const hours = Math.floor((distance % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
-        const minutes = Math.floor((distance % (1000 * 60 * 60)) / (1000 * 60));
-        const seconds = Math.floor((distance % (1000 * 60)) / 1000);
-        setCountdown(`${days}D ${hours}H ${minutes}M ${seconds}S`);
+        const d = Math.floor(distance / (1000 * 60 * 60 * 24));
+        const h = Math.floor((distance % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+        const m = Math.floor((distance % (1000 * 60 * 60)) / (1000 * 60));
+        const s = Math.floor((distance % (1000 * 60)) / 1000);
+        setCountdown(`${d}D ${h}H ${m}M ${s}S`);
       }
     }, 1000);
     return () => clearInterval(timerInterval);
@@ -165,23 +184,40 @@ export default function ProtocolGhostt() {
         setLastSeen(new Date());
       }
     } catch (e) {
-      addLog("WARN: OFFLINE MODE DETECTED");
+      addLog("WARN: OFFLINE MODE");
     }
   };
 
   const handleUnlock = () => {
+    initAudio(); // Force audio unlock on mobile
     playSound('success');
-    if (navigator.vibrate) navigator.vibrate(50); // Haptic Feedback
+    if (navigator.vibrate) navigator.vibrate(50);
     addLog("BIOMETRIC SCAN: VERIFIED");
     addLog("ACCESS GRANTED: WELCOME GHOSTT");
     speak("Identity Verified. Welcome back, Ghost.");
     setTimeout(() => setView("HUD"), 1000);
   };
 
+  const triggerAlarm = () => {
+    setAlarmActive(true);
+    playSound('alarm');
+    speak("Warning. Intrusion Detected.");
+    addLog("WARNING: INTRUSION DETECTED", "alert");
+    if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
+    setTimeout(() => setAlarmActive(false), 4000);
+  };
+
   const switchMode = (newMode) => {
     playSound('click');
     setMode(newMode);
     addLog(`UI NAVIGATION: ${newMode} PANEL`);
+  };
+
+  const generateTrap = () => {
+    const url = `${window.location.origin}/api/trap`;
+    setTrapLink(url);
+    addLog("TRAP LINK GENERATED");
+    playSound('click');
   };
 
   const pingSystem = async () => {
@@ -198,7 +234,7 @@ export default function ProtocolGhostt() {
         setLastSeen(new Date()); 
         setStatus("SUCCESS");
         playSound('success');
-        speak("Protocol Renewed. Timer Reset.");
+        speak("Protocol Renewed.");
         setStatusMsg("SIGNAL LOCKED. TIMER RESET.");
         addLog("SUCCESS: HEARTBEAT ACKNOWLEDGED");
         setTimeout(() => {
@@ -221,13 +257,12 @@ export default function ProtocolGhostt() {
       setStatus("ERROR");
       playSound('error');
       setStatusMsg("MISSING DATA FIELDS");
-      addLog("ERROR: NULL PAYLOAD DETECTED");
-      setTimeout(() => setStatus("STANDBY"), 2000);
+      addLog("ERROR: NULL PAYLOAD");
       return;
     }
 
     setStatus("PROCESSING");
-    setStatusMsg("ENCRYPTING PACKET (AES-256)...");
+    setStatusMsg("ENCRYPTING PACKET...");
     addLog(`ENCRYPTING: ${label.toUpperCase()}...`);
 
     try {
@@ -242,7 +277,7 @@ export default function ProtocolGhostt() {
         playSound('success');
         speak("Data Encrypted and Stored.");
         setStatusMsg("UPLOAD SECURE.");
-        addLog("UPLOAD COMPLETE: DATA FRAGMENTED");
+        addLog("UPLOAD COMPLETE");
         setSecret("");
         setLabel("");
         setTimeout(() => {
@@ -255,13 +290,12 @@ export default function ProtocolGhostt() {
       setStatus("ERROR");
       playSound('error');
       setStatusMsg("UPLOAD FAILED");
-      addLog("ERROR: DATABASE WRITE DENIED");
     }
   };
 
   // --- VIEWS ---
   if (view === "BOOT") return (
-    <div className="min-h-screen bg-black text-green-600 font-mono p-6 flex flex-col justify-end">
+    <div onClick={() => setView("LOCK")} className="min-h-screen bg-black text-green-600 font-mono p-6 flex flex-col justify-end">
       {logs.map((log, i) => <div key={i} className="opacity-80 text-sm">[{log.time}] {log.msg}</div>)}
       <div className="animate-pulse mt-2">_</div>
     </div>
@@ -281,7 +315,8 @@ export default function ProtocolGhostt() {
   );
 
   return (
-    <div className="min-h-screen bg-black text-green-400 font-mono p-2 overflow-hidden relative selection:bg-green-900 selection:text-white flex flex-col">
+    // FLASHING RED ON ALARM
+    <div className={`min-h-screen font-mono p-2 overflow-hidden relative flex flex-col transition-colors duration-200 ${alarmActive ? "bg-red-900 text-white" : "bg-black text-green-400"}`}>
       <div className="pointer-events-none fixed inset-0 z-50 opacity-10 bg-[linear-gradient(transparent_50%,rgba(0,255,0,0.25)_50%)] bg-[length:100%_4px]"></div>
       
       <header className="flex justify-between items-start border-b border-green-800 pb-2 mb-4 px-2 pt-2">
@@ -299,12 +334,13 @@ export default function ProtocolGhostt() {
       </header>
 
       <div className={`mb-4 mx-2 p-2 border text-center text-xs font-bold tracking-widest transition-colors duration-500 ${
+        alarmActive ? "border-red-500 bg-red-800 animate-pulse text-white" :
         status === "PROCESSING" ? "border-yellow-600 text-yellow-500 bg-yellow-900/10" :
         status === "SUCCESS" ? "border-green-500 text-green-400 bg-green-900/20" :
         status === "ERROR" ? "border-red-600 text-red-500 bg-red-900/20" :
         "border-green-900 text-green-700"
       }`}>
-        STATUS: {statusMsg}
+        STATUS: {alarmActive ? "INTRUSION DETECTED" : statusMsg}
       </div>
 
       <main className="flex-1 max-w-lg mx-auto w-full relative z-10 flex flex-col gap-4">
@@ -312,7 +348,7 @@ export default function ProtocolGhostt() {
         <div className="border border-green-800 bg-green-900/5 p-6 relative overflow-hidden text-center">
           <div className="absolute top-2 right-2 opacity-50"><LockIcon /></div>
           <h2 className="text-xs text-green-600 mb-2 tracking-widest">PROTOCOL OMEGA DEADLINE</h2>
-          <div className="text-3xl font-bold text-white mb-6 tracking-tighter drop-shadow-[0_0_10px_rgba(0,255,0,0.5)]">
+          <div className="text-2xl font-bold text-white mb-6 tracking-tighter drop-shadow-[0_0_10px_rgba(0,255,0,0.5)]">
             {countdown}
           </div>
           <button 
@@ -326,57 +362,67 @@ export default function ProtocolGhostt() {
         </div>
 
         <div className="flex border-b border-green-800 mx-2">
-          <button onClick={() => switchMode("DASHBOARD")} className={`flex-1 py-3 text-xs tracking-widest transition-colors ${mode === "DASHBOARD" ? "bg-green-500 text-black font-bold" : "text-green-800 hover:text-green-500"}`}>CONSOLE</button>
-          <button onClick={() => switchMode("VAULT")} className={`flex-1 py-3 text-xs tracking-widest transition-colors ${mode === "VAULT" ? "bg-green-500 text-black font-bold" : "text-green-800 hover:text-green-500"}`}>SECURE VAULT</button>
+          {["DASHBOARD", "HUNTER", "VAULT"].map(m => (
+            <button key={m} onClick={() => switchMode(m)} className={`flex-1 py-3 text-xs tracking-widest transition-colors ${mode === m ? "bg-green-500 text-black font-bold" : "text-green-800 hover:text-green-500"}`}>{m}</button>
+          ))}
         </div>
 
-        <div className="flex-1 bg-black p-4 mx-2 border-x border-b border-green-800 min-h-[300px]">
-          {mode === "DASHBOARD" ? (
+        <div className="flex-1 bg-black p-4 mx-2 border-x border-b border-green-800 min-h-[300px] overflow-y-auto">
+          
+          {mode === "DASHBOARD" && (
             <div className="space-y-2 font-mono text-xs h-full flex flex-col justify-end">
               {logs.map((log, i) => (
-                 <div key={i} className="border-l-2 border-green-900 pl-2 text-green-500/70">
+                 <div key={i} className={`border-l-2 pl-2 ${log.type==='alert' ? 'border-red-500 text-red-400' : 'border-green-900 text-green-500/70'}`}>
                    <span className="text-green-800">[{log.time}]</span> {log.msg}
                  </div>
               ))}
               <div className="animate-pulse text-green-500">_</div>
             </div>
-          ) : (
+          )}
+
+          {mode === "HUNTER" && (
+            <div className="flex flex-col h-full">
+              <div className="text-center mb-4">
+                <button onClick={generateTrap} className="border border-red-500 text-red-500 px-4 py-2 text-xs hover:bg-red-500 hover:text-black transition-colors uppercase">
+                  GENERATE TRAP LINK
+                </button>
+                {trapLink && (
+                  <div className="mt-2 text-[10px] break-all bg-red-900/20 p-2 border border-red-900 text-red-400 select-all">
+                    {trapLink}
+                  </div>
+                )}
+              </div>
+              <div className="space-y-2 mt-2">
+                  {hunterHits.length === 0 ? <span className="text-[10px] opacity-30 text-green-800">NO TARGETS ACQUIRED</span> : 
+                   hunterHits.map((hit, i) => (
+                    <div key={i} className="bg-red-900/10 border border-red-900/30 p-2 text-[10px]">
+                      <div className="text-red-400 font-bold">INTRUSION DETECTED</div>
+                      <div className="opacity-70 text-green-600">IP: {hit.ip || "UNKNOWN"}</div>
+                      <div className="opacity-50 text-[8px] truncate text-green-800">{hit.device}</div>
+                    </div>
+                  ))}
+              </div>
+            </div>
+          )}
+
+          {mode === "VAULT" && (
             <div className="flex flex-col gap-4 h-full">
-              <div className="text-[10px] text-green-700 mb-2 uppercase border-b border-green-900 pb-2">Destination Protocol</div>
-              <input 
-                value={email} 
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="EMERGENCY CONTACT EMAIL" 
-                className="bg-green-900/10 border border-green-800 p-3 text-green-400 focus:outline-none focus:border-green-400 text-xs tracking-widest placeholder-green-900"
-              />
+              <div className="text-[10px] text-green-700 uppercase border-b border-green-900 pb-2">Destination Protocol</div>
+              <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="EMERGENCY CONTACT EMAIL" className="bg-green-900/10 border border-green-800 p-3 text-green-400 focus:outline-none focus:border-green-400 text-xs tracking-widest placeholder-green-900" />
               <div className="text-[10px] text-green-700 mt-2 uppercase border-b border-green-900 pb-2">Payload Encryption</div>
-              <input 
-                value={label} 
-                onChange={(e) => setLabel(e.target.value)}
-                placeholder="DATA LABEL" 
-                className="bg-green-900/10 border border-green-800 p-3 text-green-400 focus:outline-none focus:border-green-400 text-xs tracking-widest placeholder-green-900"
-              />
-              <textarea 
-                value={secret} 
-                onChange={(e) => setSecret(e.target.value)}
-                placeholder="ENTER SENSITIVE DATA..." 
-                className="flex-1 bg-green-900/10 border border-green-800 p-3 text-green-400 focus:outline-none focus:border-green-400 text-xs font-mono resize-none placeholder-green-900"
-              />
-              <button 
-                onClick={uploadSecret} 
-                disabled={status === "PROCESSING"}
-                className={`py-3 border text-xs font-bold tracking-widest transition-colors uppercase
-                  ${status === "PROCESSING" ? "border-green-900 text-green-900" : "border-green-600 text-green-600 hover:bg-green-600 hover:text-black"}`}
-              >
+              <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="DATA LABEL" className="bg-green-900/10 border border-green-800 p-3 text-green-400 focus:outline-none focus:border-green-400 text-xs tracking-widest placeholder-green-900" />
+              <textarea value={secret} onChange={(e) => setSecret(e.target.value)} placeholder="ENTER SENSITIVE DATA..." className="flex-1 bg-green-900/10 border border-green-800 p-3 text-green-400 focus:outline-none focus:border-green-400 text-xs font-mono resize-none placeholder-green-900" />
+              <button onClick={uploadSecret} disabled={status === "PROCESSING"} className="py-3 border border-green-600 text-green-600 text-xs font-bold tracking-widest transition-colors uppercase hover:bg-green-600 hover:text-black">
                 {status === "PROCESSING" ? "ENCRYPTING..." : "UPLOAD TO VAULT"}
               </button>
             </div>
           )}
+
         </div>
       </main>
       
       <footer className="p-4 text-center text-[10px] text-green-900 border-t border-green-900 mt-auto">
-        SECURE CONNECTION ESTABLISHED // V4.0.0 (AUDIO_ENABLED)
+        SECURE CONNECTION ESTABLISHED // V7.0 (HYBRID)
       </footer>
     </div>
   );
