@@ -22,16 +22,10 @@ const playSound = (type) => { if (!audioCtx) initAudio(); if (!audioCtx) return;
 const speak = (text) => { if (typeof window !== 'undefined' && window.speechSynthesis) { const u = new SpeechSynthesisUtterance(text); u.pitch=0.8; u.rate=1.1; const v = window.speechSynthesis.getVoices().find(v=>v.name.includes('Google US English')||v.name.includes('Samantha')); if(v) u.voice=v; window.speechSynthesis.speak(u); } };
 
 // --- UTILS ---
-// Calculate distance between two GPS points in meters (Haversine Formula)
 const getDist = (lat1, lon1, lat2, lon2) => {
-  const R = 6371e3; // Earth radius in meters
-  const φ1 = lat1 * Math.PI/180;
-  const φ2 = lat2 * Math.PI/180;
-  const Δφ = (lat2-lat1) * Math.PI/180;
-  const Δλ = (lon2-lon1) * Math.PI/180;
+  const R = 6371e3; const φ1 = lat1 * Math.PI/180; const φ2 = lat2 * Math.PI/180; const Δφ = (lat2-lat1) * Math.PI/180; const Δλ = (lon2-lon1) * Math.PI/180;
   const a = Math.sin(Δφ/2) * Math.sin(Δφ/2) + Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ/2) * Math.sin(Δλ/2);
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-  return R * c;
+  return R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a)));
 };
 
 export default function ProtocolGhostt() {
@@ -59,11 +53,15 @@ export default function ProtocolGhostt() {
   const [stegoImage, setStegoImage] = useState(null);
   const [decodedMsg, setDecodedMsg] = useState("");
 
-  // DEAD DROP STATES
   const [gps, setGps] = useState(null);
   const [dropMsg, setDropMsg] = useState("");
   const [dropList, setDropList] = useState([]);
-  const [dropDist, setDropDist] = useState(null);
+
+  // BUG DETECTOR REFS
+  const canvasRef = useRef(null);
+  const analyserRef = useRef(null);
+  const streamRef = useRef(null);
+  const animationRef = useRef(null);
 
   const addLog = (msg, type="info") => { const d = new Date(); setLogs(p => [...p.slice(-7), { time: `${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}:${d.getSeconds().toString().padStart(2,'0')}`, msg, type }]); };
 
@@ -72,44 +70,99 @@ export default function ProtocolGhostt() {
     const timer = setInterval(() => { const d = new Date(); setClockTime(`${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}`); }, 1000);
     if (typeof navigator !== 'undefined' && navigator.getBattery) navigator.getBattery().then(b => setBattery(Math.floor(b.level * 100)));
     fetchLastSeen();
-    
-    // GPS WATCHER
-    if ('geolocation' in navigator) {
-      navigator.geolocation.watchPosition((pos) => {
-        setGps({ lat: pos.coords.latitude, lng: pos.coords.longitude, acc: pos.coords.accuracy });
-      }, (err) => console.log(err), { enableHighAccuracy: true });
-    }
+    if ('geolocation' in navigator) { navigator.geolocation.watchPosition((pos) => { setGps({ lat: pos.coords.latitude, lng: pos.coords.longitude, acc: pos.coords.accuracy }); }, (err) => console.log(err), { enableHighAccuracy: true }); }
 
     try {
-      // Listen for Hunter Traps
       const q = query(collection(db, "hunter_logs"), orderBy("timestamp", "desc"), limit(5));
-      const unsubHunter = onSnapshot(q, (snap) => {
-        const hits = snap.docs.map(d => d.data());
-        if (hits.length > 0 && hunterHits.length > 0 && hits[0].timestamp > hunterHits[0].timestamp) triggerAlarm();
-        setHunterHits(hits);
-      });
-      // Listen for Dead Drops
+      const unsubHunter = onSnapshot(q, (snap) => { const hits = snap.docs.map(d => d.data()); if (hits.length > 0 && hunterHits.length > 0 && hits[0].timestamp > hunterHits[0].timestamp) triggerAlarm(); setHunterHits(hits); });
       const qDrops = query(collection(db, "dead_drops"), orderBy("timestamp", "desc"), limit(10));
-      const unsubDrops = onSnapshot(qDrops, (snap) => {
-        setDropList(snap.docs.map(d => ({ id: d.id, ...d.data() })));
-      });
-      return () => { clearInterval(timer); unsubHunter(); unsubDrops(); };
+      const unsubDrops = onSnapshot(qDrops, (snap) => { setDropList(snap.docs.map(d => ({ id: d.id, ...d.data() }))); });
+      return () => { clearInterval(timer); unsubHunter(); unsubDrops(); stopBugDetector(); };
     } catch(e){}
   }, []);
 
-  // Countdown & Drop Distance Checker
   useEffect(() => {
-    // Omega Countdown
-    if (lastSeen) {
-      const interval = setInterval(() => {
-        const now = new Date().getTime();
-        const d = lastSeen.getTime() + (30 * 24 * 60 * 60 * 1000) - now;
-        if (d < 0) setCountdown("EXECUTED");
-        else setCountdown(`${Math.floor(d / (864e5))}D ${Math.floor((d % 864e5) / 36e5)}H ${Math.floor((d % 36e5) / 6e4)}M ${Math.floor((d % 6e4) / 1e3)}S`);
-      }, 1000);
-      return () => clearInterval(interval);
-    }
+    if (!lastSeen) return;
+    const interval = setInterval(() => {
+      const now = new Date().getTime(); const d = lastSeen.getTime() + (30 * 24 * 60 * 60 * 1000) - now;
+      if (d < 0) setCountdown("EXECUTED");
+      else setCountdown(`${Math.floor(d / (864e5))}D ${Math.floor((d % 864e5) / 36e5)}H ${Math.floor((d % 36e5) / 6e4)}M ${Math.floor((d % 6e4) / 1e3)}S`);
+    }, 1000);
+    return () => clearInterval(interval);
   }, [lastSeen]);
+
+  // --- BUG DETECTOR LOGIC ---
+  const startBugDetector = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
+      const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const analyser = audioCtx.createAnalyser();
+      const source = audioCtx.createMediaStreamSource(stream);
+      source.connect(analyser);
+      analyser.fftSize = 256;
+      analyserRef.current = analyser;
+      drawFrequency();
+      addLog("MIC SENSORS ACTIVE", "success");
+    } catch (e) {
+      addLog("MIC ACCESS DENIED", "alert");
+    }
+  };
+
+  const stopBugDetector = () => {
+    if (streamRef.current) streamRef.current.getTracks().forEach(track => track.stop());
+    if (animationRef.current) cancelAnimationFrame(animationRef.current);
+  };
+
+  const drawFrequency = () => {
+    if (!canvasRef.current || !analyserRef.current) return;
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext('2d');
+    const bufferLength = analyserRef.current.frequencyBinCount;
+    const dataArray = new Uint8Array(bufferLength);
+
+    const draw = () => {
+      animationRef.current = requestAnimationFrame(draw);
+      analyserRef.current.getByteFrequencyData(dataArray);
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.2)';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      const barWidth = (canvas.width / bufferLength) * 2.5;
+      let barHeight;
+      let x = 0;
+
+      // Check for volume spikes
+      let maxVol = 0;
+      for (let i = 0; i < bufferLength; i++) {
+        if (dataArray[i] > maxVol) maxVol = dataArray[i];
+      }
+      // If loud spike, draw RED, else GREEN
+      if (maxVol > 200) {
+         ctx.fillStyle = '#ff0000'; // Alert color
+      } else {
+         ctx.fillStyle = '#00ff00'; // Normal color
+      }
+
+      for (let i = 0; i < bufferLength; i++) {
+        barHeight = dataArray[i] / 2;
+        ctx.fillRect(x, canvas.height - barHeight, barWidth, barHeight);
+        x += barWidth + 1;
+      }
+    };
+    draw();
+  };
+
+  const switchMode = (m) => {
+    playSound('click');
+    setMode(m);
+    addLog(`NAV: ${m}`);
+    // Handle Mic
+    if (m === "DETECTOR") {
+       setTimeout(startBugDetector, 500); // Small delay for UI load
+    } else {
+       stopBugDetector();
+    }
+  };
 
   // --- ACTIONS ---
   const fetchLastSeen = async () => { try { const snap = await getDoc(doc(db, "system", "ghostt_status")); if (snap.exists()) { setLastSeen(snap.data().last_seen.toDate()); setEmail(snap.data().emergency_email || ""); } } catch(e) {} };
@@ -117,41 +170,9 @@ export default function ProtocolGhostt() {
   const handleCalcTap = (val) => { if (val === 'C') { setCalcDisplay("0"); return; } if (val === '=') { if (calcDisplay === "999") { setView("BOOT"); initAudio(); runBootSequence(); } else { try { setCalcDisplay(eval(calcDisplay).toString()); } catch { setCalcDisplay("Error"); } } return; } setCalcDisplay(prev => prev === "0" ? val : prev + val); };
   const runBootSequence = () => { const text = ["INITIALIZING...", "LOADING KERNEL...", "GPS TRIANGULATION...", "SYSTEM ONLINE"]; let delay = 0; text.forEach((t, i) => { delay += 800; setTimeout(() => { addLog(t); if (i === text.length - 1) { setView("LOCK"); speak("System Online."); } }, delay); }); };
   const handleUnlock = () => { setView("HUD"); playSound('success'); addLog("IDENTITY VERIFIED"); };
-  const switchMode = (m) => { playSound('click'); setMode(m); addLog(`NAV: ${m}`); };
-
-  // --- FEATURE: DEAD DROP ---
-  const createDrop = async () => {
-    if (!gps) { setStatus("ERROR"); addLog("GPS SIGNAL LOST"); return; }
-    if (!dropMsg) return;
-    setStatus("LOCKING");
-    try {
-      await addDoc(collection(db, "dead_drops"), { 
-        msg: dropMsg, 
-        lat: gps.lat, 
-        lng: gps.lng, 
-        timestamp: serverTimestamp() 
-      });
-      setDropMsg(""); setStatus("SUCCESS"); playSound('success'); addLog(`DROP LOCKED AT ${gps.lat.toFixed(4)}, ${gps.lng.toFixed(4)}`);
-      setTimeout(()=>setStatus("STANDBY"), 2000);
-    } catch(e) { setStatus("ERROR"); }
-  };
-
-  const accessDrop = (drop) => {
-    if (!gps) { addLog("GPS SIGNAL LOST", "alert"); return; }
-    const dist = getDist(gps.lat, gps.lng, drop.lat, drop.lng);
-    setDropDist(dist);
-    if (dist < 50) { // 50 meters range
-      alert(`DECRYPTED MESSAGE:\n\n${drop.msg}`);
-      addLog("DROP RETRIEVED", "success");
-      playSound('success');
-    } else {
-      addLog(`ACCESS DENIED. TARGET IS ${Math.round(dist)}m AWAY`, "alert");
-      playSound('error');
-      speak("Access Denied. You are not at the location.");
-    }
-  };
-
-  // --- OTHER FEATURES ---
+  
+  const createDrop = async () => { if (!gps) { setStatus("ERROR"); addLog("GPS SIGNAL LOST"); return; } if (!dropMsg) return; setStatus("LOCKING"); try { await addDoc(collection(db, "dead_drops"), { msg: dropMsg, lat: gps.lat, lng: gps.lng, timestamp: serverTimestamp() }); setDropMsg(""); setStatus("SUCCESS"); playSound('success'); addLog(`DROP LOCKED AT ${gps.lat.toFixed(4)}, ${gps.lng.toFixed(4)}`); setTimeout(()=>setStatus("STANDBY"), 2000); } catch(e) { setStatus("ERROR"); } };
+  const accessDrop = (drop) => { if (!gps) { addLog("GPS SIGNAL LOST", "alert"); return; } const dist = getDist(gps.lat, gps.lng, drop.lat, drop.lng); if (dist < 50) { alert(`DECRYPTED MESSAGE:\n\n${drop.msg}`); addLog("DROP RETRIEVED", "success"); playSound('success'); } else { addLog(`ACCESS DENIED. TARGET IS ${Math.round(dist)}m AWAY`, "alert"); playSound('error'); speak("Access Denied. Too far."); } };
   const generateTrap = () => { setTrapLink(`${window.location.origin}/api/trap`); addLog("TRAP GENERATED"); playSound('click'); };
   const createBurner = async () => { if(!burnerMsg) return; setStatus("PROCESSING"); playSound('click'); try { const res = await fetch('/api/burner', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({message: burnerMsg}) }); const d = await res.json(); setBurnerLink(`${window.location.origin}/burner/${d.id}`); setBurnerMsg(""); setStatus("SUCCESS"); playSound('success'); addLog("BURNER ACTIVE"); setTimeout(()=>setStatus("STANDBY"),2000); } catch(e){ setStatus("ERROR"); } };
   const pingSystem = async () => { playSound('click'); setStatus("PROCESSING"); addLog("HANDSHAKE INIT..."); try { await updateDoc(doc(db, "system", "ghostt_status"), { last_seen: serverTimestamp(), status: "ACTIVE" }); setTimeout(() => { setLastSeen(new Date()); setStatus("SUCCESS"); playSound('success'); speak("Protocol Renewed."); setStatusMsg("SIGNAL LOCKED"); addLog("HEARTBEAT OK"); setTimeout(()=>{setStatus("STANDBY");setStatusMsg("OPTIMAL");},3000); }, 1500); } catch(e) { setStatus("ERROR"); playSound('error'); } };
@@ -173,46 +194,30 @@ export default function ProtocolGhostt() {
 
       <main className="flex-1 max-w-lg mx-auto w-full relative z-10 flex flex-col gap-4">
         <div className="border border-green-800 bg-green-900/5 p-6 relative overflow-hidden text-center backdrop-blur-sm"><div className="absolute top-2 right-2 opacity-50"><LockIcon /></div><h2 className="text-xs text-green-600 mb-2 tracking-widest">PROTOCOL OMEGA DEADLINE</h2><div className="text-2xl font-bold text-white mb-6 tracking-tighter drop-shadow-[0_0_10px_rgba(0,255,0,0.5)]">{countdown}</div><button onClick={pingSystem} disabled={status==="PROCESSING"} className={`w-full py-4 text-sm font-bold tracking-[0.2em] transition-all uppercase border ${status==="PROCESSING"?"border-yellow-600 text-yellow-600":"border-green-500 hover:bg-green-500 hover:text-black hover:shadow-[0_0_20px_rgba(0,255,0,0.4)]"}`}>{status==="PROCESSING" ? "UPLINKING..." : "RENEW SIGNAL"}</button></div>
-        <div className="flex border-b border-green-800 mx-2 overflow-x-auto whitespace-nowrap scrollbar-hide">{["DASHBOARD", "DROP", "HUNTER", "VAULT", "BURNER", "SHADOW"].map(m => (<button key={m} onClick={()=>switchMode(m)} className={`px-4 py-3 text-[10px] tracking-widest transition-colors ${mode===m?"bg-green-500 text-black font-bold":"text-green-800 hover:text-green-500"}`}>{m}</button>))}</div>
+        <div className="flex border-b border-green-800 mx-2 overflow-x-auto whitespace-nowrap scrollbar-hide">{["DASHBOARD", "DETECTOR", "DROP", "HUNTER", "VAULT", "BURNER", "SHADOW"].map(m => (<button key={m} onClick={()=>switchMode(m)} className={`px-4 py-3 text-[10px] tracking-widest transition-colors ${mode===m?"bg-green-500 text-black font-bold":"text-green-800 hover:text-green-500"}`}>{m}</button>))}</div>
 
         <div className="flex-1 bg-black p-4 mx-2 border-x border-b border-green-800 min-h-[300px] overflow-y-auto backdrop-blur-md bg-opacity-80">
           {mode === "DASHBOARD" && (<div className="space-y-2 font-mono text-xs h-full flex flex-col justify-end">{logs.map((log, i) => (<div key={i} className={`border-l-2 pl-2 ${log.type==='alert'?'border-red-500 text-red-400':'border-green-900 text-green-500/70'}`}><span className="text-green-800">[{log.time}]</span> {log.msg}</div>))}<div className="animate-pulse text-green-500">_</div></div>)}
           
-          {mode === "DROP" && (
-            <div className="flex flex-col h-full gap-4">
-              <div className="text-[10px] text-green-700 uppercase border-b border-green-900 pb-2">LOCATION-LOCKED DATA</div>
-              <div className="text-xs text-green-400">
-                CURRENT: {gps ? `${gps.lat.toFixed(4)}, ${gps.lng.toFixed(4)}` : "ACQUIRING SATELLITE..."}
-                {gps && <span className="ml-2 text-green-700">acc: {Math.round(gps.acc)}m</span>}
-              </div>
-              <textarea value={dropMsg} onChange={(e)=>setDropMsg(e.target.value)} placeholder="MESSAGE TO LOCK HERE..." className="bg-green-900/10 border border-green-800 p-3 text-green-400 h-20 text-xs font-mono" />
-              <button onClick={createDrop} className="py-2 border border-green-600 text-green-600 text-xs font-bold uppercase hover:bg-green-600 hover:text-black">LOCK TO CURRENT COORDINATES</button>
-              
-              <div className="border-t border-green-900 pt-2 mt-2">
-                <div className="text-[10px] text-green-700 mb-2">NEARBY DROPS</div>
-                {dropList.length === 0 ? <div className="text-green-900 text-[10px]">NO SIGNALS DETECTED</div> : 
-                  dropList.map(d => (
-                    <div key={d.id} className="flex justify-between items-center bg-green-900/10 p-2 mb-2 border border-green-900/30">
-                      <div className="text-[10px] text-green-500">
-                        {d.lat.toFixed(3)}, {d.lng.toFixed(3)}
-                        <div className="text-green-800">{new Date(d.timestamp?.toDate()).toLocaleDateString()}</div>
-                      </div>
-                      <button onClick={()=>accessDrop(d)} className="text-[10px] border border-green-700 px-2 py-1 hover:bg-green-500 hover:text-black">ACCESS</button>
-                    </div>
-                  ))
-                }
+          {mode === "DETECTOR" && (
+            <div className="flex flex-col h-full gap-4 items-center justify-center">
+              <div className="text-[10px] text-green-700 uppercase mb-2">ACOUSTIC SPECTRUM ANALYZER</div>
+              <canvas ref={canvasRef} width="300" height="150" className="border border-green-800 bg-green-900/10 w-full" />
+              <div className="text-[10px] text-green-500 animate-pulse text-center mt-2">
+                MONITORING AUDIO FREQUENCIES...<br/>
+                SPIKES INDICATE HIDDEN DEVICES OR MOVEMENT
               </div>
             </div>
           )}
 
-          {/* OTHER MODES (HUNTER, VAULT, ETC) REMAIN SAME AS V10 */}
+          {mode === "DROP" && (<div className="flex flex-col h-full gap-4"><div className="text-[10px] text-green-700 uppercase border-b border-green-900 pb-2">LOCATION-LOCKED DATA</div><div className="text-xs text-green-400">CURRENT: {gps ? `${gps.lat.toFixed(4)}, ${gps.lng.toFixed(4)}` : "ACQUIRING SATELLITE..."}{gps && <span className="ml-2 text-green-700">acc: {Math.round(gps.acc)}m</span>}</div><textarea value={dropMsg} onChange={(e)=>setDropMsg(e.target.value)} placeholder="MESSAGE TO LOCK..." className="bg-green-900/10 border border-green-800 p-3 text-green-400 h-20 text-xs font-mono" /><button onClick={createDrop} className="py-2 border border-green-600 text-green-600 text-xs font-bold uppercase hover:bg-green-600 hover:text-black">LOCK TO CURRENT COORDINATES</button><div className="border-t border-green-900 pt-2 mt-2"><div className="text-[10px] text-green-700 mb-2">NEARBY DROPS</div>{dropList.length === 0 ? <div className="text-green-900 text-[10px]">NO SIGNALS</div> : dropList.map(d => (<div key={d.id} className="flex justify-between items-center bg-green-900/10 p-2 mb-2 border border-green-900/30"><div className="text-[10px] text-green-500">{d.lat.toFixed(3)}, {d.lng.toFixed(3)}<div className="text-green-800">{new Date(d.timestamp?.toDate()).toLocaleDateString()}</div></div><button onClick={()=>accessDrop(d)} className="text-[10px] border border-green-700 px-2 py-1 hover:bg-green-500 hover:text-black">ACCESS</button></div>))}</div></div>)}
           {mode === "HUNTER" && (<div className="flex flex-col h-full"><div className="text-center mb-4"><button onClick={generateTrap} className="border border-red-500 text-red-500 px-4 py-2 text-xs hover:bg-red-500 hover:text-black transition-colors uppercase shadow-[0_0_10px_rgba(255,0,0,0.3)]">GENERATE TRAP LINK</button>{trapLink && <div className="mt-2 text-[10px] break-all bg-red-900/20 p-2 border border-red-900 text-red-400 select-all">{trapLink}</div>}</div><div className="space-y-2 mt-2">{hunterHits.length === 0 ? <span className="text-[10px] opacity-30 text-green-800">NO TARGETS ACQUIRED</span> : hunterHits.map((hit, i) => (<div key={i} className="bg-red-900/10 border border-red-900/30 p-2 text-[10px]"><div className="text-red-400 font-bold">INTRUSION DETECTED</div><div className="opacity-70 text-green-600">IP: {hit.ip || "UNKNOWN"}</div><div className="opacity-50 text-[8px] truncate text-green-800">{hit.device}</div></div>))}</div></div>)}
           {mode === "BURNER" && (<div className="flex flex-col h-full"><div className="text-[10px] text-green-700 uppercase border-b border-green-900 pb-2 mb-2">Self-Destruct Message</div><textarea value={burnerMsg} onChange={(e)=>setBurnerMsg(e.target.value)} placeholder="TYPE MESSAGE..." className="flex-1 bg-green-900/10 border border-green-800 p-3 text-green-400 focus:outline-none focus:border-green-400 text-xs font-mono resize-none placeholder-green-900 mb-2" /><button onClick={createBurner} disabled={status==="PROCESSING"} className="py-2 border border-green-600 text-green-600 text-xs font-bold tracking-widest transition-colors uppercase hover:bg-green-600 hover:text-black mb-4">{status==="PROCESSING"?"ENCRYPTING...":"CREATE BURNER LINK"}</button>{burnerLink && <div className="text-[10px] break-all bg-green-900/20 p-2 border border-green-500 text-green-300 select-all">{burnerLink}</div>}</div>)}
           {mode === "VAULT" && (<div className="flex flex-col gap-4 h-full"><div className="text-[10px] text-green-700 uppercase border-b border-green-900 pb-2">Destination</div><input value={email} onChange={(e)=>setEmail(e.target.value)} placeholder="EMAIL" className="bg-green-900/10 border border-green-800 p-3 text-green-400 focus:outline-none focus:border-green-400 text-xs tracking-widest placeholder-green-900" /><div className="text-[10px] text-green-700 mt-2 uppercase border-b border-green-900 pb-2">Payload</div><input value={label} onChange={(e)=>setLabel(e.target.value)} placeholder="LABEL" className="bg-green-900/10 border border-green-800 p-3 text-green-400 focus:outline-none focus:border-green-400 text-xs tracking-widest placeholder-green-900" /><textarea value={secret} onChange={(e)=>setSecret(e.target.value)} placeholder="DATA..." className="flex-1 bg-green-900/10 border border-green-800 p-3 text-green-400 focus:outline-none focus:border-green-400 text-xs font-mono resize-none placeholder-green-900" /><button onClick={uploadSecret} disabled={status==="PROCESSING"} className="py-3 border border-green-600 text-green-600 text-xs font-bold tracking-widest transition-colors uppercase hover:bg-green-600 hover:text-black">{status==="PROCESSING"?"ENCRYPTING...":"UPLOAD"}</button></div>)}
           {mode === "SHADOW" && (<div className="flex flex-col gap-4 h-full overflow-y-auto"><div className="text-[10px] text-green-700 uppercase border-b border-green-900 pb-2">ENCODE (HIDE)</div><input value={stegoMsg} onChange={(e)=>setStegoMsg(e.target.value)} placeholder="SECRET MESSAGE..." className="bg-green-900/10 border border-green-800 p-2 text-green-400 text-xs" /><label className="border border-green-600 text-green-600 text-xs text-center py-2 cursor-pointer hover:bg-green-600 hover:text-black">SELECT IMAGE<input type="file" accept="image/*" onChange={(e)=>handleImageUpload(e,'encode')} className="hidden" /></label>{stegoImage && <div className="text-center"><img src={stegoImage} alt="Encoded" className="max-h-32 mx-auto border border-green-800" /><a href={stegoImage} download="shadow_file.png" className="block mt-2 text-[10px] text-green-400 underline">DOWNLOAD</a></div>}<div className="text-[10px] text-green-700 uppercase border-b border-green-900 pb-2 mt-4">DECODE (REVEAL)</div><label className="border border-green-800 text-green-800 text-xs text-center py-2 cursor-pointer hover:bg-green-800 hover:text-black">UPLOAD FILE<input type="file" accept="image/*" onChange={(e)=>handleImageUpload(e,'decode')} className="hidden" /></label>{decodedMsg && <div className="bg-green-900/20 p-2 border border-green-500 text-green-300 text-xs break-all mt-2">REVEALED: {decodedMsg}</div>}</div>)}
         </div>
       </main>
-      <footer className="p-4 text-center text-[10px] text-green-900 border-t border-green-900 mt-auto">SECURE CONNECTION // V11.0 (DEAD DROP)</footer>
+      <footer className="p-4 text-center text-[10px] text-green-900 border-t border-green-900 mt-auto">SECURE CONNECTION // V12.0 (BUG DETECTOR)</footer>
     </div>
   );
 }
